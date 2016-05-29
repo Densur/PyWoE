@@ -38,7 +38,10 @@ class WoE:
                 else:
                     self.spec_values[k] = 'd_' + v
         else:
-            self.spec_values = {i: 'd_' + str(i) for i in spec_values}
+            if self.spec_values is None:
+                self.spec_values = {}
+            else:
+                self.spec_values = {i: 'd_' + str(i) for i in spec_values}
 
     def fit(self, x, y):
         """
