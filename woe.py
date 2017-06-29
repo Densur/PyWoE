@@ -7,9 +7,10 @@ from sklearn.model_selection import cross_val_score
 __author__ = 'Denis Surzhko'
 
 
-# ver 0.1.5.1
-# transform: manual woe replacement added
-# bug fix: min_leaf optimization fixed
+# ver 0.1.6
+# default woe replcement for labels not observable in traning dataset addded in transform method
+# self.plot optimized for matplotlib version 2
+# self.type to self.v_type renamed (for convenience)
 class WoE:
     """
     Basic functionality for WoE bucketing of continuous and discrete variables
@@ -20,7 +21,7 @@ class WoE:
     def __init__(self, qnt_num=16, min_block_size=16, spec_values=None, v_type='c', bins=None, t_type='b'):
         """
         :param qnt_num: Number of buckets (quartiles) for continuous variable split
-        :param min_block_size: minimum number of observation in each bucket (continuous variables), incl. optimization restrictions
+        :param min_block_size: min number of obs in bucket (continuous variables), incl. optimization restrictions
         :param spec_values: List or Dictionary {'label': value} of special values (frequent items etc.)
         :param v_type: 'c' for continuous variable, 'd' - for discrete
         :param bins: Predefined bucket borders for continuous variable split
@@ -29,7 +30,7 @@ class WoE:
         """
         self.__qnt_num = qnt_num  # Num of buckets/quartiles
         self._predefined_bins = None if bins is None else np.array(bins)  # user bins for continuous variables
-        self.type = v_type  # if 'c' variable should be continuous, if 'd' - discrete
+        self.v_type = v_type  # if 'c' variable should be continuous, if 'd' - discrete
         self._min_block_size = min_block_size  # Min num of observation in bucket
         self._gb_ratio = None  # Ratio of good and bad in the sample
         self.bins = None  # WoE Buckets (bins) and related statistics
@@ -70,7 +71,7 @@ class WoE:
         if np.max(y) > 1 or np.min(y) < 0:
             raise ValueError("Y range should be between 0 and 1")
         # setting discrete values as special values
-        if self.type == 'd':
+        if self.v_type == 'd':
             sp_values = {i: 'd_' + str(i) for i in x.unique()}
             if len(sp_values) > 100:
                 raise type("DiscreteVarOverFlowError", (Exception,),
@@ -109,7 +110,7 @@ class WoE:
         return self.df['woe']
 
     def _split_sample(self, df):
-        if self.type == 'd':
+        if self.v_type == 'd':
             return df, None
         sp_values_flag = df['X'].isin(self.spec_values.keys()).values | df['X'].isnull().values
         df_sp_values = df[sp_values_flag].copy()
@@ -168,11 +169,12 @@ class WoE:
         label_woe = self.bins[['woe', 'labels']].drop_duplicates()
         self.df = pd.merge(self.df, label_woe, left_on=['labels'], right_on=['labels'])
 
-    def transform(self, x, manual_woe=None):
+    def transform(self, x, manual_woe=None, replace_missing=None):
         """
         Transforms input variable according to previously fitted rule
         :param x: input variable
         :param manual_woe: one can change fitted woe with manual values by providing dict {label: new_woe_value}
+        :replace_missing: replace woe for labels not observable in traning dataset by this value
         :return: DataFrame with transformed with original and transformed variables
         """
         if not isinstance(x, pd.Series):
@@ -183,17 +185,19 @@ class WoE:
         # splitting to discrete and continous pars
         df_sp_values, df_cont = self._split_sample(df)
         # Replacing original with manual woe
+        tr_bins = self.bins[['woe', 'labels']].copy()
         if manual_woe:
-            tr_bins = self.bins[['woe', 'labels']].copy()
             if not type(manual_woe) == dict:
                 TypeError("manual_woe should be dict")
             else:
                 for key in manual_woe:
                     tr_bins['woe'].mask(tr_bins['labels'] == key, manual_woe[key], inplace=True)
-        else:
-            tr_bins = self.bins
-            # function checks existence of special values, raises error if sp do not exist in training set
 
+        if replace_missing is not None:
+            tr_bins = tr_bins.append({'labels': 'd__transform_missing_replacement__', 'woe': replace_missing},
+                                     ignore_index=True)
+
+        # function checks existence of special values, raises error if sp do not exist in training set
         def get_sp_label(x_):
             if x_ in self.spec_values.keys():
                 return self.spec_values[x_]
@@ -202,13 +206,16 @@ class WoE:
                 if str_x in list(self.bins['labels']):
                     return str_x
                 else:
-                    raise ValueError('Value {} does not exist in the training set'.format(str_x))
+                    if replace_missing is not None:
+                        return 'd__transform_missing_replacement__'
+                    else:
+                        raise ValueError('Value {} does not exist in the training set'.format(str_x))
 
         # assigning labels to discrete part
         df_sp_values['labels'] = df_sp_values['X'].apply(get_sp_label)
         # assigning labels to continuous part
         c_bins = self.bins[self.bins['labels'].apply(lambda z: not z.startswith('d_'))]
-        if not self.type == 'd':
+        if self.v_type != 'd':
             cuts = pd.cut(df_cont['X'], bins=np.append(c_bins["bins"], (float("inf"),)), labels=c_bins["labels"])
             df_cont['labels'] = cuts.astype(str)
         # Joining continuous and discrete parts
@@ -239,7 +246,7 @@ class WoE:
                 spec_values[i] = label1 + '_' + label2
             bin2 = self.bins[self.bins['labels'] == label2]['bins'].iloc[0]
             spec_values[bin2] = label1 + '_' + label2
-        new_woe = WoE(self.__qnt_num, self._min_block_size, spec_values, self.type, c_bins['bins'], self.t_type)
+        new_woe = WoE(self.__qnt_num, self._min_block_size, spec_values, self.v_type, c_bins['bins'], self.t_type)
         return new_woe.fit(self.df['X'], self.df['Y'])
 
     def plot(self, sort_values=True, labels=False):
@@ -255,27 +262,38 @@ class WoE:
         ax = woe_fig.add_subplot(111)
         ax.set_ylabel('Observations')
         plot_data = self.bins[['labels', 'woe', 'obs', 'bins']].copy().drop_duplicates()
+
+        # creating plot labels
+        if self.v_type != 'd':
+            cont_labels = plot_data['labels'].apply(lambda z: not z.startswith('d_'))
+            plot_data['plot_bins'] = plot_data['bins'].apply(lambda x: '{:0.2g}'.format(x))
+            temp_data = plot_data[cont_labels].copy()
+
+            right_bound = temp_data['plot_bins'].iloc[1:].append(pd.Series(['Inf']))
+            temp_data['plot_bins'] = temp_data['plot_bins'].add(' : ').add(list(right_bound))
+
+            plot_data = temp_data.append(plot_data[~cont_labels])
+            cont_labels = plot_data['labels'].apply(lambda z: not z.startswith('d_'))
+            plot_data['plot_bins'] = np.where(cont_labels, plot_data['plot_bins'], plot_data['labels'])
+        else:
+            plot_data['plot_bins'] = plot_data['bins']
+
+        # sorting
         if sort_values:
-            if self.type == 'd':
-                plot_data.sort_values('woe', inplace=True)
-            else:
+            if self.v_type != 'd':
                 cont_labels = plot_data['labels'].apply(lambda z: not z.startswith('d_'))
                 temp_data = plot_data[cont_labels].sort_values('bins')
                 plot_data = temp_data.append(plot_data[~cont_labels].sort_values('labels'))
-        # creating plot labels
-        plot_data['plot_bins'] = plot_data['bins'].apply(lambda x: '{:0.2g}'.format(x))
-        right_bound = plot_data['plot_bins'].iloc[1:].append(pd.Series(['Inf']))
-        plot_data['plot_bins'] = plot_data['plot_bins'].add(' : ')
-        plot_data['plot_bins'] = plot_data['plot_bins'].add(list(right_bound))
-        cont_labels = plot_data['labels'].apply(lambda z: not z.startswith('d_'))
-        plot_data['plot_bins'] = np.where(cont_labels, plot_data['plot_bins'], plot_data['labels'])
+            else:
+                plot_data.sort_values('woe', inplace=True)
+
         # start plotting
         index = np.arange(plot_data.shape[0])
-        plt.xticks(index + 0.8 * bar_width, plot_data['labels'] if labels else  plot_data['plot_bins'])
+        plt.xticks(index, plot_data['labels'] if labels else plot_data['plot_bins'])
         plt.bar(index, plot_data['obs'], bar_width, color='b', label='Observations')
         ax2 = ax.twinx()
         ax2.set_ylabel('Weight of Evidence')
-        ax2.plot(index + bar_width / 2, plot_data['woe'], 'bo-', linewidth=4.0, color='r', label='WoE')
+        ax2.plot(index, plot_data['woe'], 'bo-', linewidth=4.0, color='r', label='WoE')
         handles1, labels1 = ax.get_legend_handles_labels()
         handles2, labels2 = ax2.get_legend_handles_labels()
         handles = handles1 + handles2
@@ -323,7 +341,7 @@ class WoE:
         final_tree.fit(x_train, y_train)
         opt_bins = final_tree.tree_.threshold[final_tree.tree_.feature >= 0]
         opt_bins = np.sort(opt_bins)
-        new_woe = WoE(self.__qnt_num, self._min_block_size, self.spec_values, self.type, opt_bins, self.t_type)
+        new_woe = WoE(self.__qnt_num, self._min_block_size, self.spec_values, self.v_type, opt_bins, self.t_type)
         return new_woe.fit(self.df['X'], self.df['Y'])
 
     @staticmethod
@@ -363,6 +381,11 @@ if __name__ == "__main__":
     woe.fit(pd.Series(x1), pd.Series(y_))
     # Transform x2 using x1 transformation rules
     woe.transform(pd.Series(x2))
+    fig = woe.plot()
+    plt.show(fig)
+    # refit to check nan replacement by default value
+    x1[0:20] = 0
+    woe.fit(pd.Series(x1), pd.Series(y_))
     # Optimize x1 transformation using tree with maximal depth = 5 (optimal depth is chosen by cross-validation)
     woe2 = woe.optimize(max_depth=5, min_samples_leaf=int(N / 3))
     woe2 = woe.optimize(max_depth=3, scoring='r2')
@@ -371,16 +394,24 @@ if __name__ == "__main__":
     # Merge 2 and 3 continuous buckets
     woe4 = woe3.merge('2')
     print('Transformation with manual woe')
-    print(woe4.transform(pd.Series(x2), manual_woe={'d_0_d_1': -1, '2': 1})[['labels', 'woe']].drop_duplicates())
+
+    print(woe4.transform(pd.Series(x2), manual_woe={'d_0_d_1': -1, '2': 1}, replace_missing=0)
+          [['labels', 'woe']].drop_duplicates())
     # Print Statistics
     print(woe.bins)
-    # print(woe2.bins)
-    # print(woe3.bins)
     print(woe4.bins)
     # Plot and show WoE graph
-    fig = woe.plot()
-    plt.show(fig)
     fig = woe2.plot()
     plt.show(fig)
     fig = woe4.plot(labels=True)
+    plt.show(fig)
+    # Discrete target variable test
+    data = pd.DataFrame({'sex': ['Male', 'Female', 'Female', 'Female', 'Male', 'Female', 'Male', 'Male'],
+                         'sex2': ['Male', 'Female', 'Female', 'Female', 'Male', 'Female', 'Male', 'Unknown']},)
+    defaults = pd.Series([0, 1, 1, 1, 1, 0, 0, 1])
+    d_var = WoE(t_type='d', v_type='d')
+    d_var.fit(data['sex'], defaults)
+    # replace missing 'Unknown' gender by default value in transform
+    print(d_var.transform(data['sex2'], replace_missing=0))
+    fig = d_var.plot()
     plt.show(fig)
