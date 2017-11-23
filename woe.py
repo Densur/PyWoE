@@ -1,4 +1,5 @@
 import pandas as pd
+import operator
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn import tree
@@ -7,10 +8,8 @@ from sklearn.model_selection import cross_val_score
 __author__ = 'Denis Surzhko'
 
 
-# ver 0.1.6
-# default woe replcement for labels not observable in traning dataset addded in transform method
-# self.plot optimized for matplotlib version 2
-# self.type to self.v_type renamed (for convenience)
+# ver 0.2
+# new force_monotonic function for transformation under monotonic dependence hypothesis
 class WoE:
     """
     Basic functionality for WoE bucketing of continuous and discrete variables
@@ -214,7 +213,7 @@ class WoE:
         # assigning labels to discrete part
         df_sp_values['labels'] = df_sp_values['X'].apply(get_sp_label)
         # assigning labels to continuous part
-        c_bins = self.bins[self.bins['labels'].apply(lambda z: not z.startswith('d_'))]
+        c_bins = self.__get_cont_bins()
         if self.v_type != 'd':
             cuts = pd.cut(df_cont['X'], bins=np.append(c_bins["bins"], (float("inf"),)), labels=c_bins["labels"])
             df_cont['labels'] = cuts.astype(str)
@@ -226,6 +225,13 @@ class WoE:
         df.sort_values('order', inplace=True)
         return df.set_index(x.index)
 
+    def __get_cont_bins(self):
+        """
+        Helper function
+        :return: return continous part of self.bins
+        """
+        return self.bins[self.bins['labels'].apply(lambda z: not z.startswith('d_'))]
+
     def merge(self, label1, label2=None):
         """
         Merge of buckets with given labels
@@ -236,7 +242,7 @@ class WoE:
         :return:
         """
         spec_values = self.spec_values.copy()
-        c_bins = self.bins[self.bins['labels'].apply(lambda x: not x.startswith('d_'))].copy()
+        c_bins = self.__get_cont_bins().copy()
         if label2 is None and not label1.startswith('d_'):  # removing bucket for continuous variable
             c_bins = c_bins[c_bins['labels'] != label1]
         else:
@@ -248,6 +254,30 @@ class WoE:
             spec_values[bin2] = label1 + '_' + label2
         new_woe = WoE(self.__qnt_num, self._min_block_size, spec_values, self.v_type, c_bins['bins'], self.t_type)
         return new_woe.fit(self.df['X'], self.df['Y'])
+
+    def force_monotonic(self, hypothesis=0):
+        """
+        Makes transformation monotonic if possible, given relationship hypothesis (otherwise - MonotonicConstraintError
+        exception)
+        :hypothesis: direct (0) or inverse (1) hypothesis relationship between predictor and target variable
+        :return: new WoE object with monotonic transformation
+        """
+        if hypothesis == 0:
+            op_func = operator.gt
+        else:
+            op_func = operator.lt
+        cont_bins = self.__get_cont_bins()
+        new_woe = self
+        for i, w in enumerate(cont_bins[1:]['woe']):
+            if op_func(cont_bins.iloc[i].loc['woe'], w):
+                if cont_bins.shape[0] < 3:
+                    raise type("MonotonicConstraintError", (Exception,),
+                               {"args": ('Impossible to force Monotonic Constraint',)})
+                else:
+                    new_woe = self.merge(cont_bins.iloc[i+1].loc['labels'])
+                    new_woe = new_woe.force_monotonic(hypothesis)
+                    return new_woe
+        return new_woe
 
     def plot(self, sort_values=True, labels=False):
         """
@@ -383,6 +413,10 @@ if __name__ == "__main__":
     woe.transform(pd.Series(x2))
     fig = woe.plot()
     plt.show(fig)
+    # make monotonic transformation with decreasing relationship hypothesis
+    woe_monotonic = woe.force_monotonic(hypothesis=1)
+    fig = woe_monotonic.plot()
+    plt.show(fig)
     # refit to check nan replacement by default value
     x1[0:20] = 0
     woe.fit(pd.Series(x1), pd.Series(y_))
@@ -415,3 +449,4 @@ if __name__ == "__main__":
     print(d_var.transform(data['sex2'], replace_missing=0))
     fig = d_var.plot()
     plt.show(fig)
+
