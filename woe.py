@@ -8,8 +8,8 @@ from sklearn.model_selection import cross_val_score
 __author__ = 'Denis Surzhko'
 
 
-# ver 0.2
-# new force_monotonic function for transformation under monotonic dependence hypothesis
+# ver 0.2.2
+# merge & _calc_stat bug fixes
 class WoE:
     """
     Basic functionality for WoE bucketing of continuous and discrete variables
@@ -166,7 +166,7 @@ class WoE:
         # adding stat data to bins
         self.bins = pd.merge(stat, self.bins, left_index=True, right_on=['labels'])
         label_woe = self.bins[['woe', 'labels']].drop_duplicates()
-        self.df = pd.merge(self.df, label_woe, left_on=['labels'], right_on=['labels'])
+        self.df = pd.merge(self.df, label_woe, left_on=['labels'], right_on=['labels'], how='left')
 
     def transform(self, x, manual_woe=None, replace_missing=None):
         """
@@ -248,10 +248,9 @@ class WoE:
         else:
             if not (label1.startswith('d_') and label2.startswith('d_')):
                 raise Exception('Labels should be discrete simultaneously')
-            for i in self.bins[self.bins['labels'] == label1]['bins']:
+            for i in self.bins.loc[self.bins['labels'].isin([label1, label2]), 'bins']:
                 spec_values[i] = label1 + '_' + label2
-            bin2 = self.bins[self.bins['labels'] == label2]['bins'].iloc[0]
-            spec_values[bin2] = label1 + '_' + label2
+
         new_woe = WoE(self.__qnt_num, self._min_block_size, spec_values, self.v_type, c_bins['bins'], self.t_type)
         return new_woe.fit(self.df['X'], self.df['Y'])
 
@@ -401,12 +400,13 @@ if __name__ == "__main__":
     x1[0:20] = float('nan')
     x1[30:50] = float(0)
     x1[60:80] = float(1)
+    x1[85:90] = float(2)
     x2[0:10] = float('nan')
     x2[10:20] = float(1)
     x2[30:40] = float(0)
     # Initialize WoE object
     woe_def = WoE()
-    woe = WoE(7, 30, spec_values={0: '0', 1: '1'}, v_type='c', t_type=t_type_)
+    woe = WoE(7, 30, spec_values={0: '0', 1: '1', 2: '2'}, v_type='c', t_type=t_type_)
     # Transform x1
     woe.fit(pd.Series(x1), pd.Series(y_))
     # Transform x2 using x1 transformation rules
@@ -417,15 +417,14 @@ if __name__ == "__main__":
     woe_monotonic = woe.force_monotonic(hypothesis=1)
     fig = woe_monotonic.plot()
     plt.show(fig)
-    # refit to check nan replacement by default value
-    x1[0:20] = 0
-    woe.fit(pd.Series(x1), pd.Series(y_))
     # Optimize x1 transformation using tree with maximal depth = 5 (optimal depth is chosen by cross-validation)
     woe2 = woe.optimize(max_depth=5, min_samples_leaf=int(N / 3))
     woe2 = woe.optimize(max_depth=3, scoring='r2')
     # Merge discrete buckets
     woe3 = woe.merge('d_0', 'd_1')
-    # Merge 2 and 3 continuous buckets
+    print(woe3.bins)
+    print(woe3.merge('d_2', 'd_0_d_1').bins)
+    # # Merge 2 and 3 continuous buckets
     woe4 = woe3.merge('2')
     print('Transformation with manual woe')
 
